@@ -27,6 +27,7 @@ sys.path.insert(0, str(PROJECT))
 from services.benchmarks import DEFAULT  # noqa: E402
 from services.controller.config import Configuration, Limits  # noqa: E402
 from services.storage_root import artifact_root  # noqa: E402
+from services.dexjoco.objects import PRIVILEGED_ENV  # noqa: E402
 
 PROFILES = ('rgbd', 'rgb-only')
 LAYOUTS = ((1, 0), (3, 0), (1, 2))  # (exploration environments, subagents)
@@ -223,12 +224,19 @@ def index(tree):
 
 
 def render_all(selected=None):
+    """The index of every case at the default privileged-state level, whatever the shell sets
+    (the goldens record the default; --out renders at the shell's level for reviews)."""
     result = {}
-    for name in cases():
-        if selected and name not in selected:
-            continue
-        with tempfile.TemporaryDirectory(prefix='workspace-golden-') as scratch:
-            result[name] = index(render_case(name, Path(scratch)))
+    saved = os.environ.pop(PRIVILEGED_ENV, None)
+    try:
+        for name in cases():
+            if selected and name not in selected:
+                continue
+            with tempfile.TemporaryDirectory(prefix='workspace-golden-') as scratch:
+                result[name] = index(render_case(name, Path(scratch)))
+    finally:
+        if saved is not None:
+            os.environ[PRIVILEGED_ENV] = saved
     return result
 
 

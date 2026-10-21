@@ -25,6 +25,7 @@ from services.controller.demonstrations import provision_demonstration, task_dem
 from services.controller.gemini import load_key
 from services.controller.storage import persist
 from services.benchmarks import for_config
+from services.dexjoco.objects import SESSION_KEPT_ENV
 
 PROJECT = agent_host.PROJECT
 # Sessions have no wall-clock or model-call budget; only each episode's own limits end it.
@@ -451,6 +452,15 @@ def open_frontend_log(root):
     return log
 
 
+def frontend_environment(environ):
+    """The frontend's environment: the launcher's without its RAX_* settings, except the ones the
+    frontend, its simulators and formal evaluation must share with the workspace
+    (SESSION_KEPT_ENV, e.g. RAX_PRIVILEGED_STATE)."""
+    environment = {k: v for k, v in environ.items() if k in SESSION_KEPT_ENV or not k.startswith('RAX_')}
+    environment['PYTHONPATH'] = str(PROJECT)
+    return environment
+
+
 def start_frontend(config, deployed, socket, log, *, key_file=None, timeout=30):
     """The session's robot service: sole owner of its episodes, serving the CLI and the agent's Python.
     It runs in its own session: a terminal's Ctrl+C reaches only the launcher, whose cleanup then
@@ -461,8 +471,7 @@ def start_frontend(config, deployed, socket, log, *, key_file=None, timeout=30):
             '--agent-pid-file', str(config.root/PID_FILE)]
     if key_file:  # gemini_generate stays brokered by the host frontend.
         args += ['--key-file', str(key_file)]
-    environment = {k: v for k, v in os.environ.items() if not k.startswith('RAX_')}
-    environment['PYTHONPATH'] = str(PROJECT)
+    environment = frontend_environment(os.environ)
     server = subprocess.Popen(args, cwd=PROJECT, env=environment, stdout=log, stderr=log, start_new_session=True)
     deadline = time.monotonic()+timeout
     while not socket.exists():

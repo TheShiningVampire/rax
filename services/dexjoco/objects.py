@@ -133,6 +133,9 @@ def _state_entry(source, values):
 
 PRIVILEGED_ENV = "RAX_PRIVILEGED_STATE"
 PRIVILEGED_LEVELS = ("objects", "full")
+# RAX_* settings every process between the launcher and the simulator keeps when it strips the
+# other RAX_* variables (the launcher's frontend, the exploration worker).
+SESSION_KEPT_ENV = frozenset({PRIVILEGED_ENV})
 DEFAULT_PRIVILEGED_LEVEL = "full"
 MAX_CONTACT_PAIRS = 64
 # The robot models' root bodies (single arm, then the bimanual right and left arms) and hands.

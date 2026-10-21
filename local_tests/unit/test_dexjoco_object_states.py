@@ -4,6 +4,8 @@ No simulator: object_states reads a fake MuJoCo data object, and the backend rou
 the fake simulator process of test_dexjoco_backend.
 """
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -399,3 +401,25 @@ def test_exploration_workers_keep_the_level(tmp_path, monkeypatch):
         worker.stream.close()
         worker.socket.close()
         worker.log.close()
+
+
+def test_the_launcher_frontend_keeps_the_level():
+    """The frontend runs the tool text, the exploration simulators and formal evaluation: it must
+    see the launcher's level, while the launcher's other RAX_* settings stay stripped."""
+    from harness.codex_cli.auto_research import PROJECT, frontend_environment
+    seen = frontend_environment({'RAX_PRIVILEGED_STATE': 'objects', 'RAX_SOMETHING_ELSE': '1', 'HOME': '/h'})
+    assert seen == {'RAX_PRIVILEGED_STATE': 'objects', 'HOME': '/h', 'PYTHONPATH': str(PROJECT)}
+
+
+def test_the_goldens_render_at_the_default_level(monkeypatch):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
+    import render_workspaces
+    levels = []
+    monkeypatch.setattr(render_workspaces, 'cases', lambda: ['one'])
+    monkeypatch.setattr(render_workspaces, 'render_case',
+                        lambda name, scratch: levels.append(os.environ.get('RAX_PRIVILEGED_STATE')) or scratch)
+    monkeypatch.setattr(render_workspaces, 'index', lambda path: {})
+    monkeypatch.setenv('RAX_PRIVILEGED_STATE', 'objects')
+    assert render_workspaces.render_all() == {'one': {}}
+    assert levels == [None] and os.environ['RAX_PRIVILEGED_STATE'] == 'objects'

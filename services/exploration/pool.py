@@ -18,6 +18,7 @@ import time
 
 from services.benchmarks import SIMULATOR_MODULES
 from services.controller.storage import persist as _write_private_json
+from services.dexjoco.objects import SESSION_KEPT_ENV
 
 
 def slot_count(value):
@@ -30,7 +31,7 @@ def slot_count(value):
 
 # Harness settings the worker, its backend and simulator must see like the session does
 # (RAX_PRIVILEGED_STATE: services/dexjoco/objects.py privileged_level).
-WORKER_KEPT_ENV = frozenset({'RAX_PRIVILEGED_STATE'})
+WORKER_KEPT_ENV = SESSION_KEPT_ENV
 
 
 class Worker:

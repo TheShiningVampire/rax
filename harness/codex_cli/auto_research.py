@@ -763,6 +763,16 @@ def main():
         elif record.exists():
             # A repeated launch must not overwrite the original run's lifecycle.
             raise FileExistsError('This session was already launched; use --resume or a fresh configuration')
+        # The session keeps the RAX_* settings it first launched with (before the workspace text,
+        # the frontend and its simulators read them).
+        from services.controller import session_env
+        try:
+            if args.resume:
+                session_env.adopt(config.root)
+            elif not args.prepare_only:  # A disposable deployment check records nothing.
+                session_env.record(config.root)
+        except session_env.SessionEnvConflict as exc:
+            raise SystemExit(str(exc))
         persist(record, lifecycle)
         deployed = None
         try:

@@ -11,6 +11,7 @@ from pathlib import Path
 import signal
 import time
 
+from . import session_env
 from .backend import make_backend
 from .config import Configuration
 from .errors import describe
@@ -70,6 +71,7 @@ def main():
                         help='Override the per-episode wall limit in this new evaluation only')
     args = parser.parse_args()
     source, output = args.source_session.resolve(), args.output.resolve()
+    session_env.adopt(source)  # The source session's RAX_* settings, not this shell's.
     original = Configuration.from_dict(json.loads((source/'configuration.json').read_text()))
     config = replace(original, root=output, formal_episodes=args.episodes,
                      formal_eval_seed=args.eval_seed, formal_seed=args.first_layout,
@@ -78,6 +80,7 @@ def main():
         config = replace(config, formal=replace(config.formal, wall_seconds=args.formal_wall_seconds))
     validate_layouts(config)
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    session_env.record(output)
     persist(output/'operator-input.json', json.loads(json.dumps(asdict(config), default=str)))
     lifecycle = {'kind': 'formal_batch', 'pid': os.getpid(), 'status': 'running',
                  'started_at': time.time(), 'source_session': str(source), 'source_bundle': args.bundle}

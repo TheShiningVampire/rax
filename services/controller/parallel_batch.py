@@ -18,6 +18,7 @@ import sys
 import time
 import warnings
 
+from . import session_env
 from .config import Configuration
 from .errors import public_failure
 from .storage import persist, verify
@@ -117,6 +118,8 @@ def run(source, output, workers, *, bundle_id=None, episodes=50, eval_seed=1,
             rows, pending = [], list(range(episodes))
         if formal_wall_seconds is not None:
             config = replace(config, formal=replace(config.formal, wall_seconds=formal_wall_seconds))
+        # The original session's RAX_* settings, not this shell's; its workers adopt them too.
+        session_env.adopt(original)
         validate_layouts(config)
         bundle = (source/'bundles'/manifest['directory']).resolve()
         if not bundle.is_relative_to((source/'bundles').resolve()):
@@ -130,6 +133,7 @@ def run(source, output, workers, *, bundle_id=None, episodes=50, eval_seed=1,
                    for r in evidence['results']):
             raise ValueError('Original bundle has no qualifying rehearsal')
         output.mkdir(mode=0o700, parents=True, exist_ok=False)
+        session_env.record(output)
         if bundle_id is None:
             with (source/'parallel-migration.json').open('x') as claim:
                 json.dump({'output': str(output), 'pid': os.getpid(), 'created': time.time()}, claim)

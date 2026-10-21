@@ -103,6 +103,11 @@ class LookaheadRestoreError(RuntimeError):
     """The live state after a lookahead differs from the state before it; the episode is invalid."""
 
 
+class LookaheadUnavailable(RuntimeError):
+    """The lookahead cannot run from this live state; raised before anything is touched, so the
+    episode stays valid (the session reports it as a rejection)."""
+
+
 # --------------------------------------------------------- per-task knowledge
 # Raw-environment attributes each trial task's step() changes (DESIGN.md 1.3; the unit test scans
 # the official source for them). They must be found and snapshotted, not merely identity-checked.
@@ -152,6 +157,9 @@ def guard_reason(raw, env_name):
     for name in REQUIRED_ATTRS.get(env_name, ()):
         if not hasattr(raw, name):
             return f"the environment has no {name} attribute to snapshot"
+        kind = classify(name, getattr(raw, name))
+        if kind not in ("value", "array", "container"):
+            return f"the environment's {name} attribute cannot be snapshotted (kind {kind})"
     return None
 
 
@@ -474,7 +482,7 @@ def take_snapshot(session, env_name):
     for name in REQUIRED_ATTRS.get(env_name, ()):
         kind = attrs[-1].kind(name)
         if kind not in ("value", "array", "container"):
-            raise LookaheadRestoreError(f"required attribute raw.{name} cannot be snapshotted (kind {kind})")
+            raise LookaheadUnavailable(f"required attribute raw.{name} cannot be snapshotted (kind {kind})")
     overrides = {name: getattr(raw, name) for name in ("image_obs", "hz") if hasattr(raw, name)}
     return Snapshot(raw._data, snapshot_model(raw._model, env_name), attrs, snapshot_rng(raw), overrides)
 
@@ -498,30 +506,50 @@ def differing(before, after):
     return sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
 
 
-@contextmanager
-def deferred_signals(signals=(signal.SIGALRM,)):
+class SignalHold:
     """Hold the episode wall-clock alarm while the live state is being restored and verified; a
-    deferred alarm fires right after. Python runs signal handlers in the main thread only, so this
-    swaps the handler there (elsewhere it does nothing)."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-    pending, previous = [], {}
+    held alarm runs its handler on ``release()``. Python runs signal handlers in the main thread
+    only, so this swaps the handler there (elsewhere it does nothing).
 
-    def hold(signum, frame):
-        pending.append((signum, frame))
+    ``hold()`` is a single handler swap: an alarm whose handler runs before the swap raises in the
+    caller (inside the rollout's ``try``, so it is restored like any other error); one that runs
+    after it is held. There is no window in which it can skip the restore."""
 
-    for signum in signals:
-        previous[signum] = signal.signal(signum, hold)
-    try:
-        yield
-    finally:
+    def __init__(self, signals=(signal.SIGALRM,)):
+        self.signals, self.previous, self.pending = tuple(signals), {}, []
+
+    def _hold(self, signum, frame):
+        self.pending.append((signum, frame))
+
+    def hold(self):
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for signum in self.signals:
+            if signum not in self.previous:
+                self.previous[signum] = signal.signal(signum, self._hold)
+
+    def release(self, replay=True):
+        """Put the handlers back and, with ``replay``, run them for the held alarms. Without it the
+        held alarms are dropped (the episode timer repeats every second, so it fires again)."""
+        previous, self.previous = self.previous, {}
         for signum, handler in previous.items():
             signal.signal(signum, handler)
-        for signum, frame in pending:
+        pending, self.pending = self.pending, []
+        for signum, frame in pending if replay else ():
             handler = previous.get(signum)
             if callable(handler):
                 handler(signum, frame)
+
+
+@contextmanager
+def deferred_signals(signals=(signal.SIGALRM,)):
+    """``SignalHold`` as a context manager."""
+    held = SignalHold(signals)
+    held.hold()
+    try:
+        yield
+    finally:
+        held.release()
 
 
 # ------------------------------------------------------------------ rollout
@@ -555,6 +583,7 @@ def run(session, rows, *, env_name, report_every, report, progress=None, clock=t
     before = fingerprint(session, env_name, snap.attrs)
     reports, final, stop, end_row, env_step, illegal = [], None, None, None, None, None
     index, rollout_s, failure = 0, 0.0, None
+    held = SignalHold()
     try:
         try:
             if "image_obs" in snap.overrides:
@@ -567,11 +596,14 @@ def run(session, rows, *, env_name, report_every, report, progress=None, clock=t
             for index, row in enumerate(rows, 1):
                 obs, _reward, terminated, truncated, _info = session.tap._env.step(session.env._process_action(row))
                 progress["rows"] = index
-                if terminated or truncated:
-                    stop, end_row = STOP_EPISODE_END, index
-                elif getattr(raw, "_pending_illegal_reset", False):
+                # hanoi's step() sets the pending reset and terminated on the same row: test it first.
+                if getattr(raw, "_pending_illegal_reset", False):
                     stop, end_row = STOP_ILLEGAL, index
                     illegal = getattr(raw, "_illegal_trigger_reason", None)
+                    if illegal is None and isinstance(_info, dict):
+                        illegal = _info.get("illegal_reason")
+                elif terminated or truncated:
+                    stop, end_row = STOP_EPISODE_END, index
                 elif clock() - t0 > wall_seconds and index < len(rows):
                     stop = STOP_WALL
                 if stop:
@@ -582,12 +614,15 @@ def run(session, rows, *, env_name, report_every, report, progress=None, clock=t
             env_step = getattr(raw, "env_step", None)
             final = report(index, obs)
         finally:
+            held.hold()  # First: from here until the check is done, the wall-clock alarm waits.
             raw._data = snap.live
             for name, value in snap.overrides.items():
                 setattr(raw, name, value)
     except BaseException as exc:  # noqa: BLE001 - restored and verified below, then re-raised
         failure = exc
-    with deferred_signals():
+    verified = False
+    try:
+        held.hold()  # Already held, unless the rollout's finally was interrupted before its first line.
         try:
             restore_snapshot(session, snap)
         except Exception as exc:  # noqa: BLE001
@@ -599,6 +634,11 @@ def run(session, rows, *, env_name, report_every, report, progress=None, clock=t
             shown = diff if os.environ.get(VERIFY_ENV) == "full" else diff[:12]
             raise LookaheadRestoreError(f"live state differs after the lookahead in {len(diff)} components: "
                                         + ", ".join(shown)) from failure
+        verified = True
+    finally:
+        # A held alarm must not replace a LookaheadRestoreError (the session invalidates the episode
+        # on it); the repeating episode timer delivers the alarm again a second later.
+        held.release(replay=verified)
     if failure is not None:
         raise failure
     return Outcome(index, stop, end_row, env_step, illegal, reports, final, rollout_s, clock() - started)

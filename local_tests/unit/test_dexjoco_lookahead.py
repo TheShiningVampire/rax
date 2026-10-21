@@ -224,13 +224,15 @@ class FakeRaw:
             self.renders += 1
         if 1.0 / self.hz > 0:
             self.paced += 1
-        if self.illegal_at is not None and self.env_step >= self.illegal_at:
+        # As the official hanoi step(): the illegal row also returns terminated=True.
+        illegal = self.illegal_at is not None and self.env_step >= self.illegal_at
+        if illegal:
             self._pending_illegal_reset, self._illegal_trigger_reason = True, "disk on the table"
         success = self.succeed_at is not None and self.env_step >= self.succeed_at
         obs = {"state": np.concatenate([self._data.qpos, np.zeros(19)])}
         if self.image_obs:
             obs.update(front=np.zeros((4, 4, 3), np.uint8), wrist=np.zeros((4, 4, 3), np.uint8))
-        return obs, 0.0, self.env_step >= self.cap or success, False, {"succeed": success}
+        return obs, 0.0, self.env_step >= self.cap or success or illegal, False, {"succeed": success}
 
 
 class FakeAdapter:
@@ -405,7 +407,31 @@ def test_a_task_condition_end_and_an_illegal_move(session_for):
     raw.succeed_at, raw.illegal_at, raw._pending_illegal_reset = None, 3, False
     reply = call(session, "lookahead", actions=rows(20))
     assert (reply["stop_reason"], reply["end_row"], reply["illegal_reason"]) == ("illegal_move", 3, "disk on the table")
+    assert reply["end_cause"] is None  # Not reported as a task ending (which reads as a success).
     assert raw._pending_illegal_reset is False and not hasattr(raw, "_illegal_trigger_reason")
+
+
+@needs_source
+def test_an_illegal_move_at_the_objects_level(session_for):
+    session, raw = session_for(level="objects")
+    raw.illegal_at = 2
+    reply = call(session, "lookahead", actions=rows(20))
+    assert (reply["stop_reason"], reply["end_row"]) == ("illegal_move", 2)
+    assert "illegal_reason" not in reply and "end_cause" not in reply
+
+
+@needs_source
+def test_an_unsnapshottable_attribute_is_a_rejection_not_an_invalid_episode(session_for, monkeypatch):
+    session, raw = session_for()
+    raw._success_counter = object()  # A required water_plant attribute of a type the snapshot cannot copy.
+    with pytest.raises(RejectedBeforeAction, match="_success_counter"):
+        call(session, "lookahead", actions=rows(3))
+    # The same refusal from the snapshot itself (should the guard ever miss it).
+    monkeypatch.setattr(LA, "guard_reason", lambda raw, env_name: None)
+    with pytest.raises(RejectedBeforeAction, match="cannot be snapshotted"):
+        call(session, "lookahead", actions=rows(3))
+    assert session.invalid_reason is None and not session.truncated and raw.env_step == 0
+    assert session.lookahead_usage["calls"] == 0 and session.lookahead_usage["rejected"] == 2
 
 
 @needs_source
@@ -511,6 +537,104 @@ def test_the_wall_clock_alarm_waits_for_the_restore():
         assert fired == [signal.SIGALRM]
     finally:
         signal.signal(signal.SIGALRM, previous)
+
+
+@needs_source
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_an_alarm_during_the_restore_waits_for_it(session_for, monkeypatch, mismatch):
+    """The episode alarm arriving as the restore starts is held until the check is done; it never
+    skips the restore, and it never hides a mismatch."""
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signal handlers live in the main thread")
+    session, raw = session_for()
+    call(session, "chunk_step", actions=rows(2))
+    live, qpos, env_step = raw._data, raw._data.qpos.copy(), raw.env_step
+    real_restore = LA.restore_snapshot
+
+    def restore_after_an_alarm(session_, snap):
+        os.kill(os.getpid(), signal.SIGALRM)
+        for _ in range(1000):  # Python would run an unheld handler between these bytecodes.
+            pass
+        real_restore(session_, snap)
+        if mismatch:
+            raw._data.qpos[0] += 1.0
+
+    def expire(signum, frame):
+        raise TimeoutError("episode wall clock")
+
+    monkeypatch.setattr(LA, "restore_snapshot", restore_after_an_alarm)
+    previous = signal.signal(signal.SIGALRM, expire)
+    try:
+        with pytest.raises(LA.LookaheadRestoreError if mismatch else TimeoutError):
+            call(session, "lookahead", actions=rows(6))
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+    assert raw._data is live and raw.env_step == env_step and raw.image_obs is True and raw.hz == 30
+    if mismatch:
+        assert session.invalid_reason == "lookahead_restore_mismatch"
+    else:
+        assert raw._data.qpos.tolist() == qpos.tolist() and session.invalid_reason is None
+
+
+@needs_source
+def test_an_alarm_between_the_rollout_and_the_restore_is_held(session_for, monkeypatch):
+    """The gap after the rollout's ``finally`` and before the restore (where an earlier version
+    swapped the handler) is covered: the alarm is already held there."""
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signal handlers live in the main thread")
+    session, raw = session_for()
+    calls = []
+
+    class AlarmInTheGap(LA.SignalHold):
+        def hold(self):
+            calls.append(1)
+            if len(calls) == 2:  # The second hold() sits right after the rollout's except clause.
+                os.kill(os.getpid(), signal.SIGALRM)
+                for _ in range(1000):
+                    pass
+            super().hold()
+
+    def expire(signum, frame):
+        raise TimeoutError("episode wall clock")
+
+    monkeypatch.setattr(LA, "SignalHold", AlarmInTheGap)
+    previous = signal.signal(signal.SIGALRM, expire)
+    try:
+        with pytest.raises(TimeoutError):
+            call(session, "lookahead", actions=rows(12))
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+    assert len(calls) == 2 and raw.env_step == 0 and raw._success_counter == 0 and raw.image_obs is True
+    assert session.invalid_reason is None
+
+
+@needs_source
+def test_an_alarm_inside_the_rollout_is_restored_like_an_error(session_for, monkeypatch):
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signal handlers live in the main thread")
+    session, raw = session_for()
+    qpos = raw._data.qpos.copy()
+    real_report = session._lookahead_report
+
+    def report_then_alarm(index, obs):
+        out = real_report(index, obs)
+        if index == 4:
+            os.kill(os.getpid(), signal.SIGALRM)
+            for _ in range(1000):
+                pass
+        return out
+
+    def expire(signum, frame):
+        raise TimeoutError("episode wall clock")
+
+    monkeypatch.setattr(session, "_lookahead_report", report_then_alarm)
+    previous = signal.signal(signal.SIGALRM, expire)
+    try:
+        with pytest.raises(TimeoutError):
+            call(session, "lookahead", actions=rows(4))  # The alarm lands in the final report.
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+    assert raw.env_step == 0 and raw._data.qpos.tolist() == qpos.tolist() and session.invalid_reason is None
 
 
 # ------------------------------------------------------------- host wiring

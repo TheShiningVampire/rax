@@ -395,6 +395,10 @@ class DexjocoSession:
         try:
             outcome = LA.run(self, matrix, env_name=self.info["env_name"], report_every=report_every,
                              report=self._lookahead_report, progress=progress)
+        except LA.LookaheadUnavailable as exc:
+            # Refused before anything was touched: a rejection, not a failed restore.
+            self.lookahead_usage["rejected"] += 1
+            raise RejectedBeforeAction(f"Lookahead unavailable now: {exc}") from exc
         except LA.LookaheadRestoreError:
             charge()
             # Later real steps could not be trusted: the episode ends here, invalid for scoring.

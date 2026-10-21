@@ -195,8 +195,15 @@ controller.
 Use ordinary Bash, Python and file and image tools in this workspace, your working
 directory. It is persistent and the only place you can write; the skills and their
 offline references are under `.agents/skills`.
+{% if robot.objects %}
+There is no internet or direct simulator access. The simulator's object state comes
+through `{{ robot.objects }}`: use it. Do not seek other simulator internals or download
+or install simulator code.
+{% else %}
 There is no internet or simulator access. Do not seek simulator internals or download
-or install simulator code. Disk space is shared (`status` or `df -h`); keep needed
+or install simulator code.
+{% endif %}
+Disk space is shared (`status` or `df -h`); keep needed
 data and remove expendable outputs. Run records are under
 `runtime/autonomous_controller/`, read-only.
 {% if not agent_formal %}

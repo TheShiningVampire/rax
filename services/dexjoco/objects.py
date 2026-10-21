@@ -56,6 +56,59 @@ def live_sources(env_name):
     return {**sources, **POINTS.get(env_name, {})}
 
 
+# Experiment (exp/add-state-info/object): agent-visible object state. Official env name ->
+# {label: live source} the episode reviews do not track but the agent's state tool reports.
+# Fixtures and movable objects only; no success thresholds or success target points.
+STATE_EXTRA = {
+    "bimanual_hanoi": {
+        **{f"{size} disk": f"joint:hanoi_disk_{size}_joint" for size in ("large", "medium", "small")},
+        **{f"peg {post.upper()}": f"site:hanoi_post_{post}_site" for post in ("a", "b", "c")}},
+}
+
+
+def state_sources(env_name):
+    """Every measurement the agent's object-state tool reports: {label: source}."""
+    return {**live_sources(env_name), **STATE_EXTRA.get(env_name, {})}
+
+
+def arm_joint_names(dual_arm):
+    """The Panda arm joints of the official models: joint1..7, or joint<i>_right/_left."""
+    if dual_arm:
+        return {side: [f"joint{i}_{side}" for i in range(1, 8)] for side in ("right", "left")}
+    return {"arm": [f"joint{i}" for i in range(1, 8)]}
+
+
+def _state_entry(source, values):
+    kind = source.split(":", 1)[0]
+    if kind in ("joint", "body"):
+        return {"position_m": values[:3], "quaternion_wxyz": values[3:7]}
+    if kind == "hinge":
+        return {"angle_rad": values[0]}
+    if kind == "sites":
+        return {"positions_m": [values[i:i + 3] for i in range(0, len(values), 3)]}
+    if len(values) == 3:
+        return {"position_m": values}
+    return {"values": values}
+
+
+def object_states(data, env_name, dual_arm):
+    """Live world-frame state of the task's objects and fixtures and the arm joints, read-only
+    from MuJoCo ``data``. A measurement that cannot be read is reported as an error, never raised."""
+    objects = {}
+    for label, source in state_sources(env_name).items():
+        try:
+            objects[label] = _state_entry(source, read_live(data, source))
+        except Exception as exc:  # noqa: BLE001 - reported to the caller
+            objects[label] = {"error": f"{type(exc).__name__}: {exc}"}
+    arms = {}
+    for arm, names in arm_joint_names(dual_arm).items():
+        try:
+            arms[arm] = [float(data.joint(name).qpos[0]) for name in names]
+        except Exception as exc:  # noqa: BLE001
+            arms[arm] = {"error": f"{type(exc).__name__}: {exc}"}
+    return {"frame": "world", "objects": objects, "arm_joint_positions_rad": arms}
+
+
 def tail_size(env_name):
     """Values of the privileged tail: the objects' reset poses and the table height offset."""
     return sum(size for _, size, _ in TAIL[env_name]) + 1

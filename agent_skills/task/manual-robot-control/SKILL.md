@@ -49,8 +49,10 @@ autonomous controller.
 3. View the current camera images. Identify the relevant objects and a short
    sequence of manipulation stages.
 {% endif %}
-4. Ground the next target in current observations with
-   [object-localization](../object-localization/SKILL.md), choose a small, inspectable
+4. Ground the next target in current observations{% if robot.objects %}: read the
+   objects' poses with `{{ robot.objects }}`, and use
+   [object-localization](../object-localization/SKILL.md) for points it does not name{% else %} with
+   [object-localization](../object-localization/SKILL.md){% endif %}, choose a small, inspectable
    action chunk, and pick the motion tool for it as
    [robot-interface](../robot-interface/SKILL.md) describes.
 {% if formal_episode %}

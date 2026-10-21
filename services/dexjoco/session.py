@@ -10,8 +10,10 @@ the official loop holds with ``stay()`` during inference.
 The session adds the harness contract: identity-checked RPC ops, agent observations (the
 evaluation cameras at full resolution, optional depth rendered with the official
 ``collect_depth_frames``, calibration, the official state vector, the prompt), and the trusted
-operator files that dashboards and formal scoring read. Privileged state (object poses,
-the layout) stays in operator-only files.
+operator files that dashboards and formal scoring read. Experiment
+(exp/add-state-info/object): the ``object_states`` op gives the agent the objects' live poses
+and the arm joints (services/dexjoco/objects.py object_states); the layout, the success info
+and the reset tail stay in operator-only files.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from services.dexjoco import tasks as T
-from services.dexjoco.objects import read_all as read_live
+from services.dexjoco.objects import object_states, read_all as read_live
 from services.dexjoco.tools import FRAME_STRIDE
 from services.simulator.io import RejectedBeforeAction, action_execution_scope, reject_unless, require, write_json
 
@@ -448,6 +450,9 @@ class DexjocoSession:
         data = {k: v for k, v in args.items() if k not in ("episode_id", "step_id")}
         if op == "observe":
             return self.obs
+        if op == "object_states":
+            return {"episode_id": self.episode_id, "step_id": self.step_id,
+                    **object_states(self.tap.unwrapped._data, self.info["env_name"], self.info["dual_arm"])}
         if op == "chunk_step":
             return self.chunk_step(data["actions"])
         if op == "hold":

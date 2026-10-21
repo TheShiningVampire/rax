@@ -41,6 +41,9 @@ The skill links below are entry points; read only what the next step needs.
   learned skills you carried.
 - [robot-interface](.agents/skills/robot-interface/SKILL.md): this robot's motion
   tools, frames and conventions, and the motion skills it links to.
+{% if robot.objects %}
+- `{{ robot.objects }}` for the objects' exact poses.
+{% endif %}
 {% if wrist_cameras %}
 - [object-localization](.agents/skills/object-localization/SKILL.md) for positions of
   visible object points, and

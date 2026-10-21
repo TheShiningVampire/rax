@@ -18,13 +18,15 @@ from services.simulator.io import RejectedBeforeAction, reject_unless
 STATUS, OBSERVE = "dexjoco_status", "dexjoco_observe"
 STEP, HOLD = "dexjoco_step", "dexjoco_hold"
 PIXEL_TO_POSITION = "dexjoco_pixel_to_position"
+# Experiment (exp/add-state-info/object): privileged live object state from the simulator.
+OBJECT_STATES = "dexjoco_object_states"
 ROTATION_MATH = RM.TOOL
 PREVIEW_DESCRIBE, PREVIEW_RUN = "dexjoco_preview_describe", "dexjoco_preview_run"
 PREVIEW_CAMERAS = ("preview_front", "preview_side", "preview_top")
 # Robot-only preview: never advances the episode or counts against its step limit.
 PREVIEW_TOOLS = frozenset({PREVIEW_DESCRIBE, PREVIEW_RUN})
 
-ROBOT_TOOLS = frozenset({STATUS, OBSERVE, STEP, HOLD, PIXEL_TO_POSITION, ROTATION_MATH, *PREVIEW_TOOLS})
+ROBOT_TOOLS = frozenset({STATUS, OBSERVE, STEP, HOLD, PIXEL_TO_POSITION, OBJECT_STATES, ROTATION_MATH, *PREVIEW_TOOLS})
 assert ROBOT_TOOLS == DEXJOCO_TOOLS, "services/benchmarks.py and the DexJoCo tool set disagree"
 MUTATING = frozenset({STEP, HOLD})
 MAX_ACTION_ROWS = 150
@@ -112,6 +114,13 @@ def tool_definitions():
                                  "properties": {"camera": {"type": "string", "enum": list(CAMERAS)},
                                                 "u": {"type": "number"}, "v": {"type": "number"}}}},
                              "depth_window_radius": {"type": "integer", "minimum": 0, "maximum": 5}}}},
+        {"name": OBJECT_STATES, "description": (
+            "Ground-truth state of the current episode read from the simulator: the world-frame pose (position_m, "
+            "quaternion_wxyz) of each task object and fixture, named object points (position_m), articulation "
+            "angles (angle_rad), and the arm joint positions (rad, joint1..7 per arm). The hand joints and flange "
+            "poses are in the official state vector. Exact at the current step_id; no physics, no success "
+            "information."),
+         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
         {"name": ROTATION_MATH, "description": (
             "Rotation and pose arithmetic for dexjoco_step rows, converted exactly as the official row conversion "
             "does (scipy Rotation: rotation vector <-> quaternion wxyz). Operations: convert_rotation (to "
@@ -207,7 +216,7 @@ def validate_state(state, dim):
 def validate_request(name, arguments, *, action_dim=None):
     """Complete schema/shape validation before dispatch; raises RejectedBeforeAction."""
     reject_unless(isinstance(arguments, dict), "arguments must be an object")
-    if name in (STATUS, OBSERVE):
+    if name in (STATUS, OBSERVE, OBJECT_STATES):
         _only(arguments, ())
     elif name == STEP:
         _only(arguments, ("actions",))

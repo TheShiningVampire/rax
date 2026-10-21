@@ -81,6 +81,8 @@ class DexjocoBackend:
         before = (sim.episode_id, sim.step_id)
         if name == T.OBSERVE:
             return self._observation_packet(sim.request("observe"))
+        if name == T.OBJECT_STATES:
+            return _agent_safe(_jsonable(sim.request("object_states"))), []
         if name == T.PIXEL_TO_POSITION:
             if not self._geometry():
                 raise PermissionError("Pixel-to-position is unavailable with RGB-only observations")

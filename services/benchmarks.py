@@ -14,7 +14,7 @@ DEFAULT = 'dexjoco'  # Configurations and manifests without a benchmark field.
 
 DEXJOCO_TOOLS = frozenset({
     'dexjoco_status', 'dexjoco_observe', 'dexjoco_step', 'dexjoco_hold', 'dexjoco_pixel_to_position',
-    'dexjoco_rotation_math', 'dexjoco_preview_describe', 'dexjoco_preview_run',
+    'dexjoco_object_states', 'dexjoco_rotation_math', 'dexjoco_preview_describe', 'dexjoco_preview_run',
 })
 
 
@@ -130,6 +130,8 @@ BENCHMARKS = {
         # per task (services/dexjoco/benchmark.py task_robot).
         robot={'benchmark': 'DexJoCo', 'status': 'dexjoco_status', 'observe': 'dexjoco_observe',
                'step': 'dexjoco_step', 'plan': '', 'pixel': 'dexjoco_pixel_to_position',
+               # Experiment (exp/add-state-info/object): the privileged object-state tool.
+               'objects': 'dexjoco_object_states',
                'hz': 30,
                'overview_camera': 'front', 'overview': 'third-person',
                'cameras': ('front', 'random_camera', 'ego', 'ego_right', 'wrist', 'wrist_left', 'wrist_right'),

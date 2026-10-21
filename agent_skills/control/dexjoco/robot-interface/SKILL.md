@@ -82,8 +82,18 @@ same call are not run.
 
 Build every row from the latest measured state: convert the quaternion to a rotation
 vector, copy the hand joints, then change only what you intend to move
-(`dexjoco_rotation_math` `row_from_state` returns that hold row exactly). There are no
-arm joint angles and no object positions in the state; find objects in the images.
+(`dexjoco_rotation_math` `row_from_state` returns that hold row exactly). The state has no
+arm joint angles or object positions; `dexjoco_object_states` reports both.
+
+## Object state
+
+`dexjoco_object_states` returns the simulator's exact state at the current `step_id`, in
+the world frame: each task object's and fixture's pose (`position_m`, `quaternion_wxyz`),
+named object points (`position_m`), articulation angles (`angle_rad`) and the arm joint
+positions (`joint1..7` per arm). It runs no physics. Use it for where objects are and how
+they moved after each motion; your program can call it too
+(`ctx.call("dexjoco_object_states")`). It reports no success information. The cameras remain available, for example to see contacts
+and grasps.
 
 ## Start pose and frames
 
@@ -172,7 +182,8 @@ For locating objects without depth, see [object-localization](../object-localiza
 - [hand-control](../hand-control/SKILL.md) for finger postures, grasps and releases.
 - [motion-preview](../motion-preview/SKILL.md) to watch rows on a robot-only simulator
   before running them in the episode.
-- [object-localization](../object-localization/SKILL.md) for where objects are.
+- [object-localization](../object-localization/SKILL.md) for finding object points in the
+  images; `dexjoco_object_states` gives the objects' poses directly.
 {% if expert_demonstrations %}
 - [learn-from-experts](../learn-from-experts/SKILL.md) for the recorded human
   demonstrations in `runtime/experts/`.

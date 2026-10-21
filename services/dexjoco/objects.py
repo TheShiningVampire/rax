@@ -59,10 +59,15 @@ def live_sources(env_name):
 # Experiment (exp/add-state-info/object): agent-visible object state. Official env name ->
 # {label: live source} the episode reviews do not track but the agent's state tool reports.
 # Fixtures and movable objects only; no success thresholds or success target points.
+# A label already in live_sources is replaced (e.g. a 1-value sensor read as the hinge angle it is).
 STATE_EXTRA = {
     "bimanual_hanoi": {
         **{f"{size} disk": f"joint:hanoi_disk_{size}_joint" for size in ("large", "medium", "small")},
         **{f"peg {post.upper()}": f"site:hanoi_post_{post}_site" for post in ("a", "b", "c")}},
+    "water_plant": {"trigger": "hinge:joint_0"},
+    "fold_glasses": {"first temple hinge": "hinge:glass_joint_0", "second temple hinge": "hinge:glass_joint_1"},
+    # The logo is a geom on the wall, placed per layout (untracked in TAIL).
+    "bimanual_photograph": {"logo": "geompose:photograph_logo_disk"},
 }
 
 
@@ -78,9 +83,37 @@ def arm_joint_names(dual_arm):
     return {"arm": [f"joint{i}" for i in range(1, 8)]}
 
 
+def _quaternion_wxyz(m):
+    """Unit quaternion of a row-major 3x3 rotation matrix (9 values)."""
+    r = [[float(m[3 * i + j]) for j in range(3)] for i in range(3)]
+    trace = r[0][0] + r[1][1] + r[2][2]
+    if trace > 0:
+        s = 2.0 * (trace + 1.0) ** 0.5
+        q = [s / 4, (r[2][1] - r[1][2]) / s, (r[0][2] - r[2][0]) / s, (r[1][0] - r[0][1]) / s]
+    else:
+        i = max(range(3), key=lambda k: r[k][k])
+        j, k = (i + 1) % 3, (i + 2) % 3
+        s = 2.0 * (1.0 + r[i][i] - r[j][j] - r[k][k]) ** 0.5
+        q = [0.0] * 4
+        q[0] = (r[k][j] - r[j][k]) / s
+        q[1 + i], q[1 + j], q[1 + k] = s / 4, (r[j][i] + r[i][j]) / s, (r[k][i] + r[i][k]) / s
+    if q[0] < 0:
+        q = [-v for v in q]
+    return q
+
+
+def read_state(data, source):
+    """One measurement for the object-state tool: read_live, plus a geom's world pose."""
+    kind, name = source.split(":", 1)
+    if kind == "geompose":
+        geom = data.geom(name)
+        return [float(v) for v in geom.xpos] + _quaternion_wxyz(geom.xmat)
+    return read_live(data, source)
+
+
 def _state_entry(source, values):
     kind = source.split(":", 1)[0]
-    if kind in ("joint", "body"):
+    if kind in ("joint", "body", "geompose"):
         return {"position_m": values[:3], "quaternion_wxyz": values[3:7]}
     if kind == "hinge":
         return {"angle_rad": values[0]}
@@ -97,7 +130,7 @@ def object_states(data, env_name, dual_arm):
     objects = {}
     for label, source in state_sources(env_name).items():
         try:
-            objects[label] = _state_entry(source, read_live(data, source))
+            objects[label] = _state_entry(source, read_state(data, source))
         except Exception as exc:  # noqa: BLE001 - reported to the caller
             objects[label] = {"error": f"{type(exc).__name__}: {exc}"}
     arms = {}

@@ -30,7 +30,7 @@ class FakeData:
         return SimpleNamespace(xpos=[0.5, 0.5, 0.5])
 
     def geom(self, name):
-        return SimpleNamespace(xpos=[0.4, 0.4, 0.4])
+        return SimpleNamespace(xpos=[0.4, 0.4, 0.4], xmat=[0, -1, 0, 1, 0, 0, 0, 0, 1])
 
     def sensor(self, name):
         return SimpleNamespace(data=[0.7, 0.8, 0.9])
@@ -71,6 +71,25 @@ def test_entries_are_typed_by_source():
     assert microwave['food centre'] == {'position_m': [0.7, 0.8, 0.9]}
     bucket = O.object_states(FakeData(), 'pick_bucket', False)['objects']
     assert len(bucket['bucket corners']['positions_m']) == O.BUCKET_CORNERS
+
+
+def test_trial_task_extras():
+    assert O.object_states(FakeData(), 'water_plant', False)['objects']['trigger'] == {'angle_rad': 0.1}
+    glasses = O.object_states(FakeData(), 'fold_glasses', False)['objects']
+    assert glasses['first temple hinge'] == glasses['second temple hinge'] == {'angle_rad': 0.1}
+    logo = O.object_states(FakeData(), 'bimanual_photograph', True)['objects']['logo']
+    assert logo['position_m'] == [0.4, 0.4, 0.4]
+    # 90 degrees about +z.
+    assert logo['quaternion_wxyz'] == pytest.approx([2 ** -0.5, 0, 0, 2 ** -0.5])
+
+
+@pytest.mark.parametrize('m', [[1, 0, 0, 0, 1, 0, 0, 0, 1], [1, 0, 0, 0, -1, 0, 0, 0, -1],
+                               [-1, 0, 0, 0, -1, 0, 0, 0, 1], [0, 0, 1, 0, 1, 0, -1, 0, 0]])
+def test_matrix_to_quaternion(m):
+    from scipy.spatial.transform import Rotation
+    x, y, z, w = Rotation.from_matrix([m[0:3], m[3:6], m[6:9]]).as_quat()
+    expected = [w, x, y, z] if w >= 0 else [-w, -x, -y, -z]
+    assert O._quaternion_wxyz(m) == pytest.approx(expected, abs=1e-9)
 
 
 def test_unreadable_names_are_reported_not_raised():

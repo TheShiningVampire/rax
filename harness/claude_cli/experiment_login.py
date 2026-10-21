@@ -152,6 +152,12 @@ def token_account(headers, timeout=30):
     return email
 
 
+def personal_allowed() -> bool:
+    """Opt-in (RAX_ALLOW_PERSONAL_CLAUDE_LOGIN=1): accept a token issued for the operator's personal
+    account. Only the account check is relaxed; ~/.claude is still never read or copied."""
+    return os.environ.get('RAX_ALLOW_PERSONAL_CLAUDE_LOGIN') == '1'
+
+
 def check(timeout: float = 30, *, personal_email: str | None = None) -> dict:
     """status() plus a free count_tokens call proving the token is accepted.
 
@@ -170,7 +176,7 @@ def check(timeout: float = 30, *, personal_email: str | None = None) -> dict:
     result.update(verified=code == 200, check_status=code)
     owner = token_account(headers, timeout)
     result['token_account'] = owner
-    if owner and personal_email and owner.lower() == personal_email.lower():
+    if owner and personal_email and owner.lower() == personal_email.lower() and not personal_allowed():
         raise RuntimeError(f'The token belongs to your personal account {owner}; issue it while signed in '
                            f'to the experiment account and run {SETUP} again')
     if owner and result.get('email') and owner.lower() != result['email'].lower():
@@ -230,7 +236,7 @@ def main(argv=None) -> int:
             personal = account(None)
             if not experiment.get('email'):
                 raise RuntimeError(f'Not signed in under {config_dir()}; sign in to the experiment account first')
-            if personal.get('email') and personal['email'] == experiment['email']:
+            if personal.get('email') and personal['email'] == experiment['email'] and not personal_allowed():
                 raise RuntimeError(f'{experiment["email"]} is also your personal Claude login; '
                                    'sign in to a separate account dedicated to experiments')
             token = getpass.getpass('Paste the `claude setup-token` token (hidden): ') if sys.stdin.isatty() \

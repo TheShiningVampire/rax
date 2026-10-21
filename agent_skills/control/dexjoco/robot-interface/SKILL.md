@@ -92,8 +92,29 @@ the world frame: each task object's and fixture's pose (`position_m`, `quaternio
 named object points (`position_m`), articulation angles (`angle_rad`) and the arm joint
 positions (`joint1..7` per arm). It runs no physics. Use it for where objects are and how
 they moved after each motion; your program can call it too
+{% if robot.privileged == 'full' %}
+(`ctx.call("dexjoco_object_states")`).
+
+Its `privileged_level` here is `full`, so it also reports:
+
+- each free or body object's `linear_velocity_mps` and `angular_velocity_radps` (world
+  frame) and `size`: the bounding box of its collision geoms in the object's own frame
+  (`half_extents_m` around `center_offset_m` from its reported pose);
+- `contacts`: the current contacts on task objects and the hands, one row per pair (`a`,
+  `b`: an object label or a MuJoCo body name) with the summed `normal_force_n`, the
+  `count` and the mean `position_m`, strongest first;
+- `goal`: the task's official success check, written out: a `description`, the
+  `conditions` (and `failure_conditions`, which end the episode) each with `name`,
+  `satisfied`, `measured`, `threshold` and a `note`, the `targets` (positions and regions
+  to reach), `holding` (`steps_satisfied` of `steps_required` consecutive steps) when the
+  task must hold its goal, and `satisfied_now` (every condition holds at this step).
+  Tasks without a written-out check report `{"available": false}`.
+
+The cameras remain available, for example to see grasps.
+{% else %}
 (`ctx.call("dexjoco_object_states")`). It reports no success information. The cameras remain available, for example to see contacts
 and grasps.
+{% endif %}
 
 ## Start pose and frames
 

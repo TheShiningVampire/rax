@@ -114,12 +114,7 @@ def tool_definitions():
                                  "properties": {"camera": {"type": "string", "enum": list(CAMERAS)},
                                                 "u": {"type": "number"}, "v": {"type": "number"}}}},
                              "depth_window_radius": {"type": "integer", "minimum": 0, "maximum": 5}}}},
-        {"name": OBJECT_STATES, "description": (
-            "Ground-truth state of the current episode read from the simulator: the world-frame pose (position_m, "
-            "quaternion_wxyz) of each task object and fixture, named object points (position_m), articulation "
-            "angles (angle_rad), and the arm joint positions (rad, joint1..7 per arm). The hand joints and flange "
-            "poses are in the official state vector. Exact at the current step_id; no physics, no success "
-            "information."),
+        {"name": OBJECT_STATES, "description": object_states_description(),
          "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
         {"name": ROTATION_MATH, "description": (
             "Rotation and pose arithmetic for dexjoco_step rows, converted exactly as the official row conversion "
@@ -162,6 +157,27 @@ def tool_definitions():
 
 
 CONTROL_TEXT = "30 Hz, 20 ms of physics per step"
+
+
+def object_states_description(level=None):
+    """dexjoco_object_states' text at the privileged level (RAX_PRIVILEGED_STATE; objects.py)."""
+    from services.dexjoco.objects import privileged_level
+
+    level = level or privileged_level()
+    text = ("Ground-truth state of the current episode read from the simulator: the world-frame pose (position_m, "
+            "quaternion_wxyz) of each task object and fixture, named object points (position_m), articulation "
+            "angles (angle_rad), and the arm joint positions (rad, joint1..7 per arm). The hand joints and flange "
+            "poses are in the official state vector. Exact at the current step_id; no physics")
+    if level != "full":
+        return text + ", no success information."
+    return text + ". privileged_level names the level (full). " + (
+        "Each free or body object also has linear_velocity_mps and angular_velocity_radps (world frame) and size "
+        "(half_extents_m and center_offset_m: its collision geoms' bounding box in its own frame). contacts: the "
+        "current contacts on task objects and the hands per pair (a, b: object label or MuJoCo body name; "
+        "normal_force_n, count, position_m), strongest first. goal: the task's official success specification: "
+        "description, conditions and failure_conditions (name, satisfied, measured, threshold, note), targets, "
+        "holding (steps_satisfied of steps_required consecutive steps) where the task needs a hold, and "
+        "satisfied_now (every condition holds at this step); {\"available\": false} for tasks without one.")
 _NUMBER = {"type": "number"}
 
 

@@ -12,8 +12,10 @@ evaluation cameras at full resolution, optional depth rendered with the official
 ``collect_depth_frames``, calibration, the official state vector, the prompt), and the trusted
 operator files that dashboards and formal scoring read. Experiment
 (exp/add-state-info/object): the ``object_states`` op gives the agent the objects' live poses
-and the arm joints (services/dexjoco/objects.py object_states); the layout, the success info
-and the reset tail stay in operator-only files.
+and the arm joints (services/dexjoco/objects.py object_states) and, at the ``full`` privileged
+level (RAX_PRIVILEGED_STATE), velocities, sizes, contacts and the task's goal specification
+(services/dexjoco/goals.py); the layout, the success info and the reset tail stay in
+operator-only files.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from services.dexjoco import tasks as T
-from services.dexjoco.objects import object_states, read_all as read_live
+from services.dexjoco.objects import object_states, privileged_level, read_all as read_live, scene_index
 from services.dexjoco.tools import FRAME_STRIDE
 from services.simulator.io import RejectedBeforeAction, action_execution_scope, reject_unless, require, write_json
 
@@ -129,6 +131,8 @@ class DexjocoSession:
         self.collection = int(collection)
         self.episode_mode = "formal" if self.collection == T.FORMAL_COLLECTION else "exploration"
         self.include_depth = bool(include_depth)
+        self.privileged = privileged_level()  # Fails fast on an invalid RAX_PRIVILEGED_STATE.
+        self.scene = None  # Full level: object labels, robot bodies and object sizes at reset.
         self.cameras = list(self.config["camera_mapping"].values())
         self.step_limit = T.native_step_limit(task)
         self.env = None
@@ -230,6 +234,12 @@ class DexjocoSession:
         self.initial_state = np.asarray(self.tap.last_obs["state"], dtype=np.float64).tolist()
         self.initial_info = _jsonable_info(self.tap.last_info)
         self.initial_live = read_live(self.tap.unwrapped._data, self.info["env_name"])
+        if self.privileged == "full":
+            raw = self.tap.unwrapped
+            try:
+                self.scene = scene_index(raw._model, raw._data, self.info["env_name"])
+            except Exception as exc:  # noqa: BLE001 - reported by the state tool, never breaks the episode
+                self.scene = {"error": f"{type(exc).__name__}: {exc}"}
         for _ in range(self.info["preroll_steps"]):
             self.env.step(action=CLICK_MOUSE_PREROLL)
         self.episode_id = f"{self.task}_{self.episode_mode}_{self.layout_id}_{uuid.uuid4().hex[:8]}"
@@ -451,8 +461,10 @@ class DexjocoSession:
         if op == "observe":
             return self.obs
         if op == "object_states":
+            raw = self.tap.unwrapped
             return {"episode_id": self.episode_id, "step_id": self.step_id,
-                    **object_states(self.tap.unwrapped._data, self.info["env_name"], self.info["dual_arm"])}
+                    **object_states(raw._data, self.info["env_name"], self.info["dual_arm"], level=self.privileged,
+                                    model=raw._model, env=raw, scene=self.scene)}
         if op == "chunk_step":
             return self.chunk_step(data["actions"])
         if op == "hold":

@@ -112,6 +112,9 @@ def task_robot(task):
     wrists = [f'`{c}`' for c in cameras if 'wrist' in c]
     words = {'overview_camera': overview, 'cameras': cameras, 'wrist_images': ' or '.join(wrists)}
     words['arms'] = 'dual' if task_info(task)['dual_arm'] else 'single'
+    # Experiment (exp/add-state-info/object): dexjoco_object_states' level (RAX_PRIVILEGED_STATE).
+    from services.dexjoco.objects import privileged_level
+    words['privileged'] = privileged_level()
     if task_info(task)['dual_arm']:
         words['overview'] = 'third-person (behind the robots)'
     return words

@@ -28,6 +28,11 @@ def slot_count(value):
 
 
 
+# Harness settings the worker, its backend and simulator must see like the session does
+# (RAX_PRIVILEGED_STATE: services/dexjoco/objects.py privileged_level).
+WORKER_KEPT_ENV = frozenset({'RAX_PRIVILEGED_STATE'})
+
+
 class Worker:
     """Private socket transport. Worker executes native code on its main thread."""
     def __init__(self, config):
@@ -39,7 +44,7 @@ class Worker:
         # Without a wall limit an episode lasts until its step limit.
         parent.settimeout(None if config['episode_seconds'] is None else config['episode_seconds'] + 300)
         environment = {k: v for k, v in os.environ.items()
-                       if not k.startswith(('RAX_', 'OPENROUTER_', 'OPENAI_'))
+                       if k in WORKER_KEPT_ENV or not k.startswith(('RAX_', 'OPENROUTER_', 'OPENAI_'))
                        and not k.endswith(('API_KEY', 'ACCESS_TOKEN'))}
         project = Path(__file__).resolve().parents[2]
         self.log = (root / 'worker.log').open('ab')

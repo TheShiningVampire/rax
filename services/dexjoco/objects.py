@@ -16,7 +16,14 @@ world pose, ``site:``/``geom:`` a world position, ``sites:`` several sites' worl
 row, ``sensor:`` a sensor's value, ``hinge:`` a hinge joint's angle (rad). Every tail object with
 a live source is read under its own label; the other labels are the points and angles a success
 condition is defined on.
+
+Experiment (exp/add-state-info/object): ``object_states`` is the agent's privileged state tool,
+at the level ``RAX_PRIVILEGED_STATE`` selects (``privileged_level``): ``objects`` (poses, points,
+angles, arm joints) or ``full`` (the default), which adds each free-joint/body object's velocity
+and collision bounding box, the contacts on task objects and hands, and the task's goal
+specification (services/dexjoco/goals.py). The full-level parts read numpy and mujoco lazily.
 """
+import os
 
 BUCKET_CORNERS = 8  # bucket_ref_0..7; the even ones are its bottom (the official success check).
 
@@ -124,9 +131,165 @@ def _state_entry(source, values):
     return {"values": values}
 
 
-def object_states(data, env_name, dual_arm):
+PRIVILEGED_ENV = "RAX_PRIVILEGED_STATE"
+PRIVILEGED_LEVELS = ("objects", "full")
+DEFAULT_PRIVILEGED_LEVEL = "full"
+MAX_CONTACT_PAIRS = 64
+# The robot models' root bodies (single arm, then the bimanual right and left arms) and hands.
+ROBOT_ROOTS = ("base", "base_right", "base_left")
+HAND_ROOTS = ("allegro_palm", "allegro_palm_right", "allegro_palm_left")
+HAND_BODIES = ("allegro_attachment", "allegro_attachment_right", "allegro_attachment_left")
+# Sources whose object is a body with its own pose: they report velocities and a size.
+BODY_KINDS = ("joint", "body")
+
+
+def privileged_level(environ=None):
+    """The agent's privileged-state level: RAX_PRIVILEGED_STATE, ``objects`` or ``full`` (default).
+    Read the same way by the host (tool text, workspace) and the simulator (the reply)."""
+    value = (os.environ if environ is None else environ).get(PRIVILEGED_ENV, DEFAULT_PRIVILEGED_LEVEL)
+    if value not in PRIVILEGED_LEVELS:
+        raise ValueError(f"{PRIVILEGED_ENV} must be one of {PRIVILEGED_LEVELS}, not {value!r}")
+    return value
+
+
+def _error(exc):
+    return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _source_body(model, source):
+    """The body a joint:/body:/hinge: source's object is (MuJoCo body id), else None."""
+    kind, name = source.split(":", 1)
+    if kind in ("joint", "hinge"):
+        return int(model.jnt_bodyid[model.joint(name).id])
+    if kind == "body":
+        return int(model.body(name).id)
+    return None
+
+
+def _ancestors(model, body):
+    """body, its parent, ... up to (not including) the world body."""
+    while body > 0:
+        yield body
+        body = int(model.body_parentid[body])
+
+
+def scene_index(model, data, env_name):
+    """Per-episode facts for the full level, computed once at reset: each body's task-object label
+    (the nearest labelled ancestor: free joints, bodies and hinges of state_sources; geom poses and
+    points label no body), the robot's and the hands' bodies, each body name, and the size of each
+    free-joint/body object: the axis-aligned bounding box of its subtree's collision geoms (contype
+    or conaffinity set) in the object's own frame, at the reset pose."""
+    import numpy as np
+
+    sources = state_sources(env_name)
+    labelled, objects = {}, {}
+    # Objects first, then hinges: a hinge's body is labelled only when no object owns it directly.
+    for label, source in sorted(sources.items(), key=lambda item: item[1].startswith("hinge:")):
+        if source.split(":", 1)[0] not in BODY_KINDS + ("hinge",):
+            continue
+        try:
+            body = _source_body(model, source)
+        except Exception:  # noqa: BLE001 - an unreadable source labels nothing
+            continue
+        if body and body > 0:
+            labelled.setdefault(body, label)
+            if source.split(":", 1)[0] in BODY_KINDS:
+                objects[label] = body
+    names = [model.body(i).name or f"body{i}" for i in range(model.nbody)]
+    owner, robot, hand = {}, set(), set()
+    for body in range(1, model.nbody):
+        chain = list(_ancestors(model, body))
+        owner[body] = next((labelled[b] for b in chain if b in labelled), None)
+        chain_names = {names[b] for b in chain}
+        if chain_names & set(ROBOT_ROOTS):
+            robot.add(body)
+            if chain_names & set(HAND_ROOTS) or names[body] in HAND_BODIES:
+                hand.add(body)
+    sizes = {}
+    collide = [g for g in range(model.ngeom) if int(model.geom_contype[g]) | int(model.geom_conaffinity[g])]
+    signs = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=np.float64)
+    for label, body in objects.items():
+        try:
+            subtree = {b for b in range(1, model.nbody) if body in _ancestors(model, b)}
+            geoms = [g for g in collide if int(model.geom_bodyid[g]) in subtree]
+            if not geoms:
+                sizes[label] = {"error": "no collision geoms"}
+                continue
+            rotation = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+            origin = np.asarray(data.xpos[body], dtype=np.float64)
+            points = []
+            for g in geoms:
+                box = np.asarray(model.geom_aabb[g], dtype=np.float64)
+                local = box[:3] + signs * box[3:]
+                world = np.asarray(data.geom_xpos[g], dtype=np.float64) + local @ np.asarray(
+                    data.geom_xmat[g], dtype=np.float64).reshape(3, 3).T
+                points.append((world - origin) @ rotation)
+            points = np.concatenate(points)
+            low, high = points.min(axis=0), points.max(axis=0)
+            sizes[label] = {"half_extents_m": [float(v) for v in (high - low) / 2],
+                            "center_offset_m": [float(v) for v in (high + low) / 2],
+                            "frame": "object", "collision_geoms": len(geoms)}
+        except Exception as exc:  # noqa: BLE001 - reported to the caller
+            sizes[label] = _error(exc)
+    return {"objects": objects, "owner": owner, "robot": robot, "hand": hand, "names": names, "sizes": sizes}
+
+
+def object_velocity(model, data, source, mj):
+    """World-frame (linear m/s, angular rad/s) of a joint:/body: object. A free joint's qvel holds
+    the linear velocity in the world frame and the angular one in the body frame (rotated here);
+    a body uses mj_objectVelocity (flg_local=0: [angular, linear], at the body's centre of mass)."""
+    import numpy as np
+
+    kind, name = source.split(":", 1)
+    if kind == "joint":
+        joint = model.joint(name).id
+        adr, body = int(model.jnt_dofadr[joint]), int(model.jnt_bodyid[joint])
+        qvel = np.asarray(data.qvel[adr:adr + 6], dtype=np.float64)
+        rotation = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+        return [float(v) for v in qvel[:3]], [float(v) for v in rotation @ qvel[3:6]]
+    out = np.zeros(6, dtype=np.float64)
+    mj.mj_objectVelocity(model, data, mj.mjtObj.mjOBJ_BODY, int(model.body(name).id), out, 0)
+    return [float(v) for v in out[3:6]], [float(v) for v in out[0:3]]
+
+
+def contacts(model, data, scene, mj, limit=MAX_CONTACT_PAIRS):
+    """The current contacts that touch a task object or a hand, summed per pair of names (an object
+    label, else the MuJoCo body name): total normal force (mj_contactForce), contact count, mean
+    position. Robot-robot contacts and contacts inside one object are left out."""
+    import numpy as np
+
+    owner, robot, hand, names = scene["owner"], scene["robot"], scene["hand"], scene["names"]
+    contact = data.contact
+    pairs = {}
+    force = np.zeros(6, dtype=np.float64)
+    for i in range(int(data.ncon)):
+        b1 = int(model.geom_bodyid[int(contact.geom1[i])])
+        b2 = int(model.geom_bodyid[int(contact.geom2[i])])
+        if b1 in robot and b2 in robot:
+            continue
+        if not (owner.get(b1) or b1 in hand or owner.get(b2) or b2 in hand):
+            continue
+        n1, n2 = owner.get(b1) or names[b1], owner.get(b2) or names[b2]
+        if n1 == n2:
+            continue
+        # The task object first, then by name.
+        (a, _), (b, _) = sorted(((n1, b1), (n2, b2)), key=lambda item: (owner.get(item[1]) is None, item[0]))
+        mj.mj_contactForce(model, data, i, force)
+        row = pairs.setdefault((a, b), {"a": a, "b": b, "normal_force_n": 0.0, "count": 0, "_pos": np.zeros(3)})
+        row["normal_force_n"] += float(force[0])
+        row["count"] += 1
+        row["_pos"] += np.asarray(contact.pos[i], dtype=np.float64)
+    rows = sorted(pairs.values(), key=lambda row: -row["normal_force_n"])[:limit]
+    for row in rows:
+        row["position_m"] = [float(v) for v in row.pop("_pos") / row["count"]]
+    return rows
+
+
+def object_states(data, env_name, dual_arm, *, level="objects", model=None, env=None, scene=None, mj=None):
     """Live world-frame state of the task's objects and fixtures and the arm joints, read-only
-    from MuJoCo ``data``. A measurement that cannot be read is reported as an error, never raised."""
+    from MuJoCo ``data``. A measurement that cannot be read is reported as an error, never raised.
+    ``level="full"`` adds velocities, sizes (``scene``: scene_index at reset), contacts and the goal
+    (``env``: the raw official environment); ``mj`` is the mujoco module (imported when omitted)."""
     objects = {}
     for label, source in state_sources(env_name).items():
         try:
@@ -139,7 +302,30 @@ def object_states(data, env_name, dual_arm):
             arms[arm] = [float(data.joint(name).qpos[0]) for name in names]
         except Exception as exc:  # noqa: BLE001
             arms[arm] = {"error": f"{type(exc).__name__}: {exc}"}
-    return {"frame": "world", "objects": objects, "arm_joint_positions_rad": arms}
+    state = {"privileged_level": level, "frame": "world", "objects": objects, "arm_joint_positions_rad": arms}
+    if level != "full":
+        return state
+    if mj is None:
+        import mujoco as mj
+    sources = state_sources(env_name)
+    for label, source in sources.items():
+        if source.split(":", 1)[0] not in BODY_KINDS or "error" in objects[label]:
+            continue
+        entry = objects[label]
+        try:
+            entry["linear_velocity_mps"], entry["angular_velocity_radps"] = object_velocity(model, data, source, mj)
+        except Exception as exc:  # noqa: BLE001
+            entry["velocity_error"] = _error(exc)["error"]
+        entry["size"] = (scene or {}).get("sizes", {}).get(label) or {"error": "no size: the scene index is missing"}
+    try:
+        if not (scene and "owner" in scene):
+            raise RuntimeError((scene or {}).get("error", "the scene index is missing"))
+        state["contacts"] = contacts(model, data, scene, mj)
+    except Exception as exc:  # noqa: BLE001
+        state["contacts"] = _error(exc)
+    from services.dexjoco.goals import goal
+    state["goal"] = goal(env, data, env_name)
+    return state
 
 
 def tail_size(env_name):

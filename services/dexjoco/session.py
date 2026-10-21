@@ -15,7 +15,9 @@ operator files that dashboards and formal scoring read. Experiment
 and the arm joints (services/dexjoco/objects.py object_states) and, at the ``full`` privileged
 level (RAX_PRIVILEGED_STATE), velocities, sizes, contacts and the task's goal specification
 (services/dexjoco/goals.py); the layout, the success info and the reset tail stay in
-operator-only files.
+operator-only files. Experiment (exp/add-state-info/lookahead): the ``lookahead`` op simulates
+rows from the live state and restores it exactly (services/dexjoco/lookahead.py, RAX_LOOKAHEAD);
+it never advances the episode, and its per-episode use is recorded in the operator files.
 """
 
 from __future__ import annotations
@@ -27,9 +29,10 @@ from pathlib import Path
 
 import numpy as np
 
+from services.dexjoco import lookahead as LA
 from services.dexjoco import tasks as T
 from services.dexjoco.objects import object_states, privileged_level, read_all as read_live, scene_index
-from services.dexjoco.tools import FRAME_STRIDE
+from services.dexjoco.tools import FRAME_STRIDE, MAX_ACTION_ROWS
 from services.simulator.io import RejectedBeforeAction, action_execution_scope, reject_unless, require, write_json
 
 SCHEMA = "dexjoco_operator_state_v1"
@@ -148,6 +151,11 @@ class DexjocoSession:
         self.in_stay = False
         self.obs = None
         self.video = None
+        self._video_frames = 0
+        # Experiment (exp/add-state-info/lookahead): fails fast on an invalid RAX_LOOKAHEAD setting.
+        self.lookahead_enabled = LA.lookahead_enabled()
+        self.lookahead_limits = LA.limits(self.step_limit)
+        self.lookahead_usage = {"calls": 0, "rows": 0, "seconds": 0.0, "rejected": 0}
         self.metadata = {
             "task": task, "benchmark": "dexjoco", "env_name": self.info["env_name"], "regime": self.info["regime"],
             "robot_type": self.info["robot_type"], "instruction": self.config["prompt"],
@@ -157,6 +165,7 @@ class DexjocoSession:
             "preroll_steps": self.info["preroll_steps"], "action_dim": T.action_dim(task),
             "state_dim": T.state_dim(task), "depth": self.include_depth, "frame_stride": FRAME_STRIDE,
             "episode_mode": self.episode_mode,
+            "lookahead": {"enabled": self.lookahead_enabled, **self.lookahead_limits},
         }
 
     # ------------------------------------------------------------- environment
@@ -276,6 +285,7 @@ class DexjocoSession:
             return
         raw = self.env.get_raw_images()
         self.video.append_data(np.concatenate([np.asarray(raw[c])[..., :3] for c in self.cameras], axis=1))
+        self._video_frames += 1
 
     def _close_video(self):
         if self.video is not None:
@@ -346,6 +356,94 @@ class DexjocoSession:
 
         return self._execute((run for _ in range(steps)), kind="hold")
 
+    # --------------------------------------------------------------- lookahead
+    def _lookahead_record(self):
+        """Operator-side record of this episode's lookahead use (never agent-visible)."""
+        usage = dict(self.lookahead_usage, seconds=round(self.lookahead_usage["seconds"], 3))
+        return {"enabled": self.lookahead_enabled, **usage, **self.lookahead_limits}
+
+    def _lookahead_budget(self):
+        rows, calls = self.lookahead_limits["rows_per_episode"], self.lookahead_limits["calls_per_episode"]
+        used = self.lookahead_usage
+        return {"rows_used": used["rows"], "rows_left": max(0, rows - used["rows"]), "calls_used": used["calls"],
+                "calls_left": max(0, calls - used["calls"]), "seconds_per_call": self.lookahead_limits["seconds_per_call"]}
+
+    def _lookahead_report(self, row, obs):
+        raw = self.tap.unwrapped  # Holds the lookahead's MjData while the rows run.
+        state = np.asarray(obs["state"], dtype=np.float64)[:T.state_dim(self.task)]
+        return {"row": int(row), "state": state.tolist(),
+                "object_states": object_states(raw._data, self.info["env_name"], self.info["dual_arm"],
+                                               level=self.privileged, model=raw._model, env=raw, scene=self.scene)}
+
+    def lookahead(self, actions, report_every=0):
+        """Simulate rows from the live state and restore it exactly (services/dexjoco/lookahead.py).
+        Never changes step_id, the episode's flags, the video or the operator files."""
+        try:
+            self._lookahead_checks(actions, report_every)
+        except RejectedBeforeAction:
+            self.lookahead_usage["rejected"] += 1
+            raise
+        matrix = np.asarray(actions, dtype=np.float64)
+        progress, started = {"rows": 0}, time.monotonic()
+
+        def charge():
+            used = self.lookahead_usage
+            used["calls"] += 1
+            used["rows"] += progress["rows"]
+            used["seconds"] += time.monotonic() - started
+
+        try:
+            outcome = LA.run(self, matrix, env_name=self.info["env_name"], report_every=report_every,
+                             report=self._lookahead_report, progress=progress)
+        except LA.LookaheadRestoreError:
+            charge()
+            # Later real steps could not be trusted: the episode ends here, invalid for scoring.
+            self.invalid_reason = "lookahead_restore_mismatch"
+            self.truncated = True
+            self.finish_reason = self.finish_reason or "lookahead_restore_mismatch"
+            self._write_summary("lookahead_restore_mismatch")
+            raise
+        except BaseException:
+            charge()  # The live state was restored and verified; the error is reported as is.
+            raise
+        charge()
+        reply = {"episode_id": self.episode_id, "step_id": self.step_id,
+                 "rows_requested": int(len(matrix)), "rows_simulated": int(outcome.rows_simulated),
+                 "stop_reason": outcome.stop_reason, "end_row": outcome.end_row,
+                 "reports": outcome.reports, "final": outcome.final, "live_state_restored": True,
+                 "lookahead_budget": self._lookahead_budget(), "elapsed_s": round(outcome.total_s, 4),
+                 "rollout_s": round(outcome.rollout_s, 4),
+                 "rollout_s_per_row": round(outcome.rollout_s / max(1, outcome.rows_simulated), 5)}
+        if self.privileged == "full":
+            # Why the rows would end the episode; at the objects level this would disclose success.
+            reply["end_cause"] = None
+            if outcome.stop_reason == LA.STOP_EPISODE_END:
+                capped = outcome.env_step is not None and outcome.env_step >= self.info["env_step_cap"]
+                reply["end_cause"] = "step_cap" if capped else "task_condition"
+            if outcome.stop_reason == LA.STOP_ILLEGAL:
+                reply["illegal_reason"] = outcome.illegal_reason
+        return reply
+
+    def _lookahead_checks(self, actions, report_every):
+        """Refuse before touching anything (RejectedBeforeAction): DESIGN.md 2.1 and section 5."""
+        reject_unless(self.lookahead_enabled, LA.OFF_MESSAGE)
+        matrix = np.asarray(actions, dtype=np.float64)
+        dim = T.action_dim(self.task)
+        reject_unless(matrix.ndim == 2 and matrix.shape[1] == dim and 1 <= len(matrix) <= MAX_ACTION_ROWS,
+                      f"actions must be 1..{MAX_ACTION_ROWS} rows of {dim} numbers")
+        reject_unless(bool(np.isfinite(matrix).all()), "actions must be finite")
+        reject_unless(type(report_every) is int and (report_every == 0 or LA.REPORT_EVERY_MIN <= report_every
+                                                     <= MAX_ACTION_ROWS),
+                      f"report_every must be 0 or {LA.REPORT_EVERY_MIN}..{MAX_ACTION_ROWS}")
+        reject_unless(not (self.terminated or self.truncated), "Episode already ended")
+        reason = LA.guard_reason(self.tap.unwrapped, self.info["env_name"])
+        reject_unless(reason is None, f"Lookahead unavailable now: {reason}")
+        budget = self._lookahead_budget()
+        reject_unless(budget["calls_left"] > 0,
+                      f"Lookahead budget spent: {self.lookahead_limits['calls_per_episode']} calls this episode")
+        reject_unless(len(matrix) <= budget["rows_left"],
+                      f"Lookahead budget: {budget['rows_left']} rows left this episode, {len(matrix)} requested")
+
     # ---------------------------------------------------------- operator files
     def _write_operator_state(self, reason=None):
         if self.episode_id is None:
@@ -365,6 +463,7 @@ class DexjocoSession:
                        "terminated": bool(self.terminated), "truncated": False,
                        "valid_for_success_rate": bool(self.terminated and not self.invalid_reason)},
             "env_info": _jsonable_info(self.tap.last_info) if self.tap is not None else {},
+            "lookahead": self._lookahead_record(),
         }
         live = self.episode_dir / "live.npz"
         with open(live.with_suffix(".tmp"), "wb") as stream:
@@ -416,13 +515,15 @@ class DexjocoSession:
             "reason": reason,
             "end_reason": "task_complete" if self.success else ("environment_terminated" if self.terminated else None),
             "native_control_steps": self.step_id, "native_reference_step_limit": self.step_limit,
-            "step_limit_enforced": True, "episode_step_limit": self.step_limit})
+            "step_limit_enforced": True, "episode_step_limit": self.step_limit,
+            "lookahead": self._lookahead_record()})
         write_json(self.output / "summary.json", {
             "episode_id": self.episode_id, "step_id": self.step_id, "success": self.success,
             "terminated": self.terminated, "truncated": False, "complete": complete, "reason": reason,
             "control_dt": 1.0 / T.CONTROL_HZ, "no_rollback": True, "collection": self.collection,
             "layout_id": self.layout_id, "official_seed": self.layout["seed"],
-            "official_episode_index": self.layout["episode"], "episode_mode": self.episode_mode})
+            "official_episode_index": self.layout["episode"], "episode_mode": self.episode_mode,
+            "lookahead": self._lookahead_record()})
         self._write_operator_state(reason=reason)
         self._write_goal_report(reason)
 
@@ -469,5 +570,7 @@ class DexjocoSession:
             return self.chunk_step(data["actions"])
         if op == "hold":
             return self.hold(int(data["steps"]))
+        if op == "lookahead":
+            return self.lookahead(data["actions"], data.get("report_every", 0))
         raise RejectedBeforeAction(f"Unknown op: {op}")
 

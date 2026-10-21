@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from services.artifact_io import write_artifacts
+from services.dexjoco import lookahead as LA
 from services.dexjoco import rotation_math as RM
 from services.dexjoco import tasks as TK
 from services.dexjoco import tools as T
@@ -83,6 +84,8 @@ class DexjocoBackend:
             return self._observation_packet(sim.request("observe"))
         if name == T.OBJECT_STATES:
             return _agent_safe(_jsonable(sim.request("object_states"))), []
+        if name == T.LOOKAHEAD:
+            return self._lookahead(arguments, before), []
         if name == T.PIXEL_TO_POSITION:
             if not self._geometry():
                 raise PermissionError("Pixel-to-position is unavailable with RGB-only observations")
@@ -99,6 +102,16 @@ class DexjocoBackend:
                 self._evaluation = None
         return self._motion_packet(result)
 
+    def _lookahead(self, arguments, before):
+        """dexjoco_lookahead: simulated rows from the live state, restored exactly by the simulator.
+        Not a motion: the episode, its step and the cached evaluation stay as they were."""
+        sim = self.sim
+        result = sim.request("lookahead", actions=np.asarray(arguments["actions"], dtype=np.float64),
+                             report_every=int(arguments.get("report_every", 0)))
+        if (sim.episode_id, sim.step_id) != before:
+            raise RuntimeError(f"dexjoco_lookahead moved the episode from {before} to {(sim.episode_id, sim.step_id)}")
+        return _agent_safe(_jsonable(result))
+
     # ---------------------------------------------------------------- packets
     def _cameras(self):
         return list((self.sim.metadata or {}).get("cameras") or TK.official_config(self.config.task)["camera_mapping"].values())
@@ -113,7 +126,8 @@ class DexjocoBackend:
                 "robot": "Franka Panda arm" + ("s" if dual else "") + " with 16-DoF Allegro hand" + ("s" if dual else ""),
                 "action_layout": T.action_layout(dual), "state_layout": T.state_layout(dual),
                 "cameras": self._cameras(), "max_action_rows": T.MAX_ACTION_ROWS,
-                "control_frequency_hz": TK.CONTROL_HZ, "physics_seconds_per_step": TK.PHYSICS_SECONDS_PER_STEP}
+                "control_frequency_hz": TK.CONTROL_HZ, "physics_seconds_per_step": TK.PHYSICS_SECONDS_PER_STEP,
+                **({"lookahead": LA.limits(TK.native_step_limit(self.config.task))} if LA.lookahead_enabled() else {})}
 
     def _attachments(self, observation):
         content, attachments, depth = [], [], {}

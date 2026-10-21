@@ -12,6 +12,12 @@ def tool_definitions():
     return tool_definitions()
 
 
+def disabled_tools():
+    """Experiment (exp/add-state-info/lookahead): dexjoco_lookahead while RAX_LOOKAHEAD is off."""
+    from services.dexjoco.lookahead import OFF_MESSAGE, TOOL, lookahead_enabled
+    return {} if lookahead_enabled() else {TOOL: OFF_MESSAGE}
+
+
 def backend(config):
     from services.dexjoco.backend import DexjocoBackend
     return DexjocoBackend(config)
@@ -115,6 +121,9 @@ def task_robot(task):
     # Experiment (exp/add-state-info/object): dexjoco_object_states' level (RAX_PRIVILEGED_STATE).
     from services.dexjoco.objects import privileged_level
     words['privileged'] = privileged_level()
+    # Experiment (exp/add-state-info/lookahead): the tool's name, or '' while RAX_LOOKAHEAD is off.
+    from services.dexjoco.lookahead import TOOL, lookahead_enabled
+    words['lookahead'] = TOOL if lookahead_enabled() else ''
     if task_info(task)['dual_arm']:
         words['overview'] = 'third-person (behind the robots)'
     return words

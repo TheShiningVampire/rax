@@ -20,13 +20,17 @@ STEP, HOLD = "dexjoco_step", "dexjoco_hold"
 PIXEL_TO_POSITION = "dexjoco_pixel_to_position"
 # Experiment (exp/add-state-info/object): privileged live object state from the simulator.
 OBJECT_STATES = "dexjoco_object_states"
+# Experiment (exp/add-state-info/lookahead): exact lookahead from the live state (RAX_LOOKAHEAD).
+# Not mutating: it never advances the episode; it runs under the same per-environment lock.
+LOOKAHEAD = "dexjoco_lookahead"
 ROTATION_MATH = RM.TOOL
 PREVIEW_DESCRIBE, PREVIEW_RUN = "dexjoco_preview_describe", "dexjoco_preview_run"
 PREVIEW_CAMERAS = ("preview_front", "preview_side", "preview_top")
 # Robot-only preview: never advances the episode or counts against its step limit.
 PREVIEW_TOOLS = frozenset({PREVIEW_DESCRIBE, PREVIEW_RUN})
 
-ROBOT_TOOLS = frozenset({STATUS, OBSERVE, STEP, HOLD, PIXEL_TO_POSITION, OBJECT_STATES, ROTATION_MATH, *PREVIEW_TOOLS})
+ROBOT_TOOLS = frozenset({STATUS, OBSERVE, STEP, HOLD, PIXEL_TO_POSITION, OBJECT_STATES, LOOKAHEAD, ROTATION_MATH,
+                         *PREVIEW_TOOLS})
 assert ROBOT_TOOLS == DEXJOCO_TOOLS, "services/benchmarks.py and the DexJoCo tool set disagree"
 MUTATING = frozenset({STEP, HOLD})
 MAX_ACTION_ROWS = 150
@@ -79,6 +83,13 @@ def state_layout(dual_arm):
 
 
 def tool_definitions():
+    """The DexJoCo tools; dexjoco_lookahead only while RAX_LOOKAHEAD is on."""
+    from services.dexjoco.lookahead import lookahead_enabled
+
+    return [t for t in _definitions() if t["name"] != LOOKAHEAD or lookahead_enabled()]
+
+
+def _definitions():
     return [
         {"name": STATUS, "description": (
             "Episode status, step budget, official action and state layouts, cameras and instruction. No physics."),
@@ -116,6 +127,14 @@ def tool_definitions():
                              "depth_window_radius": {"type": "integer", "minimum": 0, "maximum": 5}}}},
         {"name": OBJECT_STATES, "description": object_states_description(),
          "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+        {"name": LOOKAHEAD, "description": lookahead_description(),
+         "inputSchema": {"type": "object", "required": ["actions"], "additionalProperties": False, "properties": {
+             "actions": {"type": "array", "minItems": 1, "maxItems": MAX_ACTION_ROWS,
+                         "items": {"type": "array", "items": {"type": "number"}, "minItems": 22, "maxItems": 44},
+                         "description": "dexjoco_step rows, exactly as you would send them"},
+             "report_every": {"type": "integer", "minimum": 0, "maximum": MAX_ACTION_ROWS,
+                              "description": "0 (default): report only after the last row; 5..150: also every "
+                                             "report_every rows (at most 15 intermediate reports)"}}}},
         {"name": ROTATION_MATH, "description": (
             "Rotation and pose arithmetic for dexjoco_step rows, converted exactly as the official row conversion "
             "does (scipy Rotation: rotation vector <-> quaternion wxyz). Operations: convert_rotation (to "
@@ -178,6 +197,30 @@ def object_states_description(level=None):
         "description, conditions and failure_conditions (name, satisfied, measured, threshold, note), targets, "
         "holding (steps_satisfied of steps_required consecutive steps) where the task needs a hold, and "
         "satisfied_now (every condition holds at this step); {\"available\": false} for tasks without one.")
+
+
+def lookahead_description(level=None):
+    """dexjoco_lookahead's text (services/dexjoco/lookahead.py; DESIGN.md section 6)."""
+    from services.dexjoco.lookahead import CALLS_PER_EPISODE, REPORT_EVERY_MIN, WALL_SECONDS, rows_factor
+    from services.dexjoco.objects import privileged_level
+
+    level = level or privileged_level()
+    goal = " (and, at the full privileged level, the goal)" if level == "full" else ""
+    cause = (" end_cause says whether the step limit (step_cap) or the task's own condition (task_condition) "
+             "would end it." if level == "full" else "")
+    return (f"Simulate 1..{MAX_ACTION_ROWS} dexjoco_step rows from the current live state of this episode, read the "
+            f"object states{goal} after the last row and every report_every rows ({REPORT_EVERY_MIN}..{MAX_ACTION_ROWS}), "
+            "then rewind the simulator exactly. Lookahead never changes the episode: nothing is executed, step_id, "
+            "the step budget, frames and the recording are unchanged, and a later dexjoco_step behaves as if no "
+            "lookahead had happened. The physics, controller and contacts are the episode's own (unlike "
+            "dexjoco_preview_run), so the prediction is exact for these rows from this state. Use it to compare "
+            "candidate rows, then execute the chosen rows with dexjoco_step. Stops early when the rows would end "
+            f"the episode (stop_reason episode_end, end_row).{cause} Returns state vectors and object states, no "
+            f"images. Each call costs wall-clock time (the episode's wall clock keeps running) and draws on a "
+            f"per-episode budget reported as lookahead_budget: {rows_factor()}x the episode step limit in simulated "
+            f"rows, {CALLS_PER_EPISODE} calls, {WALL_SECONDS:g} s per call.")
+
+
 _NUMBER = {"type": "number"}
 
 
@@ -237,6 +280,15 @@ def validate_request(name, arguments, *, action_dim=None):
     elif name == STEP:
         _only(arguments, ("actions",))
         validate_actions(arguments.get("actions"), action_dim)
+    elif name == LOOKAHEAD:
+        from services.dexjoco.lookahead import OFF_MESSAGE, REPORT_EVERY_MIN, lookahead_enabled
+
+        reject_unless(lookahead_enabled(), OFF_MESSAGE)
+        _only(arguments, ("actions", "report_every"))
+        validate_actions(arguments.get("actions"), action_dim)
+        every = arguments.get("report_every", 0)
+        reject_unless(type(every) is int and (every == 0 or REPORT_EVERY_MIN <= every <= MAX_ACTION_ROWS),
+                      f"report_every must be 0 or an integer {REPORT_EVERY_MIN}..{MAX_ACTION_ROWS}")
     elif name == HOLD:
         _only(arguments, ("steps",))
         steps = arguments.get("steps")

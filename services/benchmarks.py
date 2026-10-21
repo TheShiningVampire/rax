@@ -14,7 +14,8 @@ DEFAULT = 'dexjoco'  # Configurations and manifests without a benchmark field.
 
 DEXJOCO_TOOLS = frozenset({
     'dexjoco_status', 'dexjoco_observe', 'dexjoco_step', 'dexjoco_hold', 'dexjoco_pixel_to_position',
-    'dexjoco_object_states', 'dexjoco_rotation_math', 'dexjoco_preview_describe', 'dexjoco_preview_run',
+    'dexjoco_object_states', 'dexjoco_lookahead', 'dexjoco_rotation_math', 'dexjoco_preview_describe',
+    'dexjoco_preview_run',
 })
 
 
@@ -79,6 +80,12 @@ class Benchmark:
     def definitions(self):
         return [t for t in self._hooks().tool_definitions() if t['name'] in self.robot_tools]
 
+    def disabled_tools(self):
+        """Robot tools a session setting switches off, name -> why (the adapter's optional
+        ``disabled_tools()`` hook): the contract neither lists nor serves them."""
+        hook = getattr(self._hooks(), 'disabled_tools', None)
+        return dict(hook()) if hook else {}
+
     def robot_facts(self, task=None):
         """The robot words for one task: the entry's, with the adapter's optional per-task
         overrides (``task_robot(task)``), e.g. a task's own overview camera."""
@@ -132,6 +139,9 @@ BENCHMARKS = {
                'step': 'dexjoco_step', 'plan': '', 'pixel': 'dexjoco_pixel_to_position',
                # Experiment (exp/add-state-info/object): the privileged object-state tool.
                'objects': 'dexjoco_object_states',
+               # Experiment (exp/add-state-info/lookahead): exact lookahead; task_robot() blanks it
+               # while RAX_LOOKAHEAD is off.
+               'lookahead': 'dexjoco_lookahead',
                'hz': 30,
                'overview_camera': 'front', 'overview': 'third-person',
                'cameras': ('front', 'random_camera', 'ego', 'ego_right', 'wrist', 'wrist_left', 'wrist_right'),

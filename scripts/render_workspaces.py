@@ -28,6 +28,7 @@ from services.benchmarks import DEFAULT  # noqa: E402
 from services.controller.config import Configuration, Limits  # noqa: E402
 from services.storage_root import artifact_root  # noqa: E402
 from services.dexjoco.objects import PRIVILEGED_ENV  # noqa: E402
+from services.dexjoco.lookahead import KEPT_ENV as LOOKAHEAD_ENV  # noqa: E402
 
 PROFILES = ('rgbd', 'rgb-only')
 LAYOUTS = ((1, 0), (3, 0), (1, 2))  # (exploration environments, subagents)
@@ -224,10 +225,10 @@ def index(tree):
 
 
 def render_all(selected=None):
-    """The index of every case at the default privileged-state level, whatever the shell sets
-    (the goldens record the default; --out renders at the shell's level for reviews)."""
+    """The index of every case at the default privileged-state and lookahead settings, whatever
+    the shell sets (the goldens record the defaults; --out renders at the shell's for reviews)."""
     result = {}
-    saved = os.environ.pop(PRIVILEGED_ENV, None)
+    saved = {name: os.environ.pop(name) for name in (PRIVILEGED_ENV, *sorted(LOOKAHEAD_ENV)) if name in os.environ}
     try:
         for name in cases():
             if selected and name not in selected:
@@ -235,8 +236,7 @@ def render_all(selected=None):
             with tempfile.TemporaryDirectory(prefix='workspace-golden-') as scratch:
                 result[name] = index(render_case(name, Path(scratch)))
     finally:
-        if saved is not None:
-            os.environ[PRIVILEGED_ENV] = saved
+        os.environ.update(saved)
     return result
 
 

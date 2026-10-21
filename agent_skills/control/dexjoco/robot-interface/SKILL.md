@@ -115,6 +115,23 @@ The cameras remain available, for example to see grasps.
 (`ctx.call("dexjoco_object_states")`). It reports no success information. The cameras remain available, for example to see contacts
 and grasps.
 {% endif %}
+{% if robot.lookahead %}
+
+## Lookahead
+
+`{{ robot.lookahead }}` takes the exact rows you would send to `dexjoco_step` (and an
+optional `report_every`), runs them from the current state through the episode's own
+physics, controller and contacts, reports where the objects end up (`final.state` and
+`final.object_states`{% if robot.privileged == 'full' %}, including `goal`{% endif %}; `reports` every `report_every` rows), and then
+rewinds the simulator exactly. The rule: lookahead never changes the episode; use it to
+compare candidate rows, then execute the chosen rows with `dexjoco_step`. It spends no
+episode steps, and the prediction equals what `dexjoco_step` does with the same rows from
+the same state; it stops being exact once different rows run. `stop_reason:
+"episode_end"` (with `end_row`) means those rows would end the episode. Each call costs
+wall-clock time (the episode clock keeps running) and draws on a per-episode budget
+(`lookahead_budget`: rows and calls left), so look ahead at decision points, not on every
+chunk. Your program can call it too (`ctx.call("{{ robot.lookahead }}", actions=rows)`).
+{% endif %}
 
 ## Start pose and frames
 

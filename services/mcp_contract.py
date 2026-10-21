@@ -119,7 +119,7 @@ class Contract:
 
     @property
     def robot_names(self):
-        tools = self.bench.robot_tools
+        tools = self.bench.robot_tools - set(self.bench.disabled_tools())
         return tools if self.observation.geometry else tools - self.bench.geometry_tools
 
     @property
@@ -156,6 +156,9 @@ class Contract:
         return self.select(self.bench.definitions(), scoped=self.robot_names - self.bench.unscoped_tools)
 
     def require_robot(self, name, arguments):
+        disabled = self.bench.disabled_tools()
+        if name in disabled:
+            raise PermissionError(disabled[name])
         if name not in self.robot_names and name != 'gemini_generate':
             raise PermissionError('Tool is not available in this MCP contract')
         if not isinstance(arguments, dict):
